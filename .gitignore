@@ -1,0 +1,36 @@
+# Ignore package manager directories
+/straight/
+/straight/build/
+/straight/build-cache/
+/elpa/
+
+# Ignore common Emacs-generated files
+*.elc
+*.eld
+*~
+.#*
+#*#
+
+# Ignore common history and session files
+/history
+/recentf
+/tramp
+tramp
+/bookmarks
+/desktop.el
+/desktop.lock
+/transient
+/tree-sitter
+.emacs.desktop
+.emacs.desktop.lock
+
+# Ignore cache and variable dumps
+/var/
+/eln-cache
+/.cache/
+/auto-save-list/
+url/history
+
+# A special file for private, machine-specific settings
+private.el
+local.el
