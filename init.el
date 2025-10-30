@@ -1,4 +1,27 @@
 ;; =============================================================================
+;; 0. MASTER CONTROL SWITCHES
+;; - This new section controls the backend.
+;; =============================================================================
+
+(defvar my/use-elisp-tree-sitter t
+  "Control which tree-sitter backend to use.
+Set to 't' for the feature-rich `elisp-tree-sitter` (requires C compiler).
+Set to 'nil' for the built-in native `treesit` (works out-of-the-box).")
+
+;; -- SWITCH: Helper variables derived from the master switch.
+(defvar my/python-backend-dependency
+  (if my/use-elisp-tree-sitter 'tree-sitter '(treesit-auto treesit-fold))
+  "A variable holding the correct dependency for the Python configuration.")
+
+(defvar my/python-major-mode
+  (if my/use-elisp-tree-sitter 'python-tree-sitter-mode 'python-ts-mode)
+  "The Python major mode to use, based on the chosen backend.")
+
+(defvar my/python-mode-map
+  (if my/use-elisp-tree-sitter 'python-tree-sitter-mode-map 'python-ts-mode-map)
+  "The keymap for the current Python major mode.")
+
+;; =============================================================================
 ;; I. BOOTSTRAPPING (straight.el)
 ;; - This must be first. It sets up the package manager.
 ;; =============================================================================
@@ -21,79 +44,108 @@
 (use-package project)
 
 (defun my/rename-file-and-buffer (new-name)
-  "Rename the current buffer and the file it is visiting.
-Prompts for a new file name. If the new name is a directory,
-the file is moved into that directory with its current name.
-Asks for confirmation before overwriting an existing file."
-  (interactive "FRename file to: ") ; "F" prompts for a filename
+  "Rename the current buffer and the file it is visiting."
+  (interactive "FRename file to: ")
   (let ((old-name (buffer-file-name)))
-    ;; 1. Check if the buffer is actually visiting a file.
     (unless old-name
       (error "Buffer is not visiting a file"))
-
-    ;; 2. Determine the final new name. If user enters a directory,
-    ;; move the file into it.
     (when (file-directory-p new-name)
       (setq new-name (expand-file-name (file-name-nondirectory old-name) new-name)))
-
-    ;; 3. Check for overwrite, and proceed only if clear.
     (if (or (not (file-exists-p new-name))
             (y-or-n-p (format "File '%s' already exists. Overwrite it? " new-name)))
         (progn
-          ;; 4. Rename the file on disk. The '1' means ok-if-already-exists.
           (rename-file old-name new-name 1)
-          
-          ;; 5. Point the buffer to the new file path.
-          ;; The 't' arguments mean "don't ask for confirmation" and "don't mark as modified".
           (set-visited-file-name new-name t t)
-          
-          ;; 6. Rename the buffer itself to match the new filename.
-          ;; The second argument 't' makes the name unique if needed (e.g., "foo.txt<2>").
           (rename-buffer (file-name-nondirectory new-name) t)
-          
-          ;; 7. Save the buffer to its new location.
           (save-buffer)
           (message "File renamed to '%s'" new-name))
-      ;; 8. If the user answered "no" to the overwrite prompt.
       (message "Rename aborted."))))
+
 ;; =============================================================================
 ;; II. CORE EMACS TWEAKS & UI
-;; - Basic settings, fonts, theme, and the modeline.
 ;; =============================================================================
 
+;; =============================================================================
+;; II. CORE EMACS TWEAKS & UI
+;; =============================================================================
+;; In your core Emacs tweaks, or anywhere before desktop-save-mode is active.
 (use-package emacs
   :ensure nil
   :config
-  ;; No more loud beeps
+  ;; -- Core Behavior --
   (setq ring-bell-function #'ignore)
-  ;; Sensible history and session saving
-  (desktop-save-mode 1)
   (savehist-mode 1)
   (recentf-mode 1)
-  ;; Font configuration
-  (set-face-attribute 'default nil :font "Fira Code Retina" :height 120)
-  (set-face-attribute 'fixed-pitch nil :font "Fira Code Retina" :height 120)
-  (set-face-attribute 'variable-pitch nil :font "Cantarell" :height 120 :weight 'regular)
   (global-set-key (kbd "<escape>") 'keyboard-escape-quit)
-  ;; Make C-x C-c always kill the server
-  (global-set-key (kbd "C-x C-c") 'save-buffers-kill-emacs))
+  (global-set-key (kbd "C-x C-c") 'save-buffers-kill-emacs)
+
+  ;; -- Frame and Window Behavior (for UHD and emacsclient) --
+  ;; (add-to-list 'default-frame-alist '(fullscreen . maximized))
+  (setq-default line-spacing 0.2)
+  (setq inhibit-compacting-font-caches t)
+
+  ;; -- Font Configuration (for UHD) --
+  (set-face-attribute 'default nil :font "JetBrainsMono Nerd Font" :height 120)
+  (set-face-attribute 'fixed-pitch nil :font "JetBrainsMono Nerd Font" :height 120)
+  (set-face-attribute 'variable-pitch nil :font "JetBrainsMono Nerd Font" :height 120)
+
+  ;; --- CUSTOM CONTEXT-AWARE WINDOW SPLITTING ---
+  ;; This redefines the splitting logic to be more predictable.
+  ;; It will split side-by-side if the window is wide enough,
+  ;; otherwise it will split top-and-bottom.
+  (defcustom split-window-below nil
+    "If non-nil, vertical splits produce new windows below."
+    :group 'windows
+    :type 'boolean)
+
+  (defcustom split-window-right nil
+    "If non-nil, horizontal splits produce new windows to the right."
+    :group 'windows
+    :type 'boolean)
+
+  (fmakunbound #'split-window-sensibly)
+  (defun split-window-sensibly (&optional window)
+    (setq window (or window (selected-window)))
+    (or (and (window-splittable-p window t)
+             (split-window window nil (if split-window-right 'left 'right)))
+        (and (window-splittable-p window)
+             (split-window window nil (if split-window-below 'above 'below)))
+        (and (eq window (frame-root-window (window-frame window)))
+             (not (window-minibuffer-p window))
+             (let ((split-width-threshold 0))
+               (when (window-splittable-p window t)
+                 (split-window window nil (if split-window-right
+                                              'left
+                                            'right)))))))
+
+  ;; --- TUNE THE SPLITTING BREAKPOINT HERE ---
+  ;; `split-width-threshold`: Minimum width (in columns) for a side-by-side split.
+  ;; `split-height-threshold`: Minimum height (in lines) for a top/bottom split.
+  (setq-default split-height-threshold 10
+                split-width-threshold 120))
+
+(use-package desktop
+  :ensure nil ; It's a built-in package
+  :hook (after-init . desktop-save-mode) ; A robust way to enable it
+  :config
+  ;; This is the most semantically correct place for this line.
+  (add-to-list 'desktop-modes-not-to-restore 'pdf-view-mode))
 
 (use-package doom-themes
   :ensure t
   :custom
-  ;; Global settings (defaults)
-  (doom-themes-enable-bold t)   ; if nil, bold is universally disabled
-  (doom-themes-enable-italic t) ; if nil, italics is universally disabled
-  ;; for treemacs users
-  (doom-themes-treemacs-theme "doom-atom") ; use "doom-colors" for less minimal icon theme
+  (doom-themes-enable-bold t)
+  (doom-themes-enable-italic t)
+  (doom-themes-treemacs-theme "doom-atom")
   :config
-  (load-theme 'doom-one t)
+  (load-theme 'doom-gruvbox-light t)
   (doom-themes-org-config))
+;; In section: II. CORE EMACS TWEAKS & UI, right after doom-themes
 
 (use-package doom-modeline
   :ensure t
   :init (doom-modeline-mode 1)
-  :custom ((doom-modeline-height 15)))
+  :custom ((doom-modeline-height 25)))
 
 ;; =============================================================================
 ;; III. THE EDITING EXPERIENCE (Evil, Undo, Keybindings)
@@ -121,7 +173,8 @@ Asks for confirmation before overwriting an existing file."
    "ae" '(my/aidermacs-load-gemini-config :wk "Reload Gemini Config")
    "b"  '(:ignore t :which-key "Buffers")
    "bb" '(consult-buffer :wk "Switch Buffer")
-   "bk" '(kill-buffer :wk "Switch Buffer Other Window")
+   "bi" '(insert-buffer :wk "Insert Buffer")
+   "bk" '(kill-buffer :wk "Kill Buffer")
    "b4b" '(consult-buffer-other-window :wk "Switch Buffer Other Window")
    "f"  '(:ignore t :which-key "Files")
    "ff" '(find-file :wk "Find File")
@@ -134,9 +187,18 @@ Asks for confirmation before overwriting an existing file."
    "pf" '(projectile-find-file :wk "Find File in Project")
    "ps" '(projectile-ripgrep :wk "Search Project (Ripgrep)")
    "g"  '(:ignore t :which-key "Git")
+   "gp" '(magit-push :wk "Git Push")
+   "gF" '(magit-pull :wk "Git Pull")
+   "gc" '(magit-commit :wk "Git Commit")
    "gg" '(magit-status :wk "Magit Status")
    "gb" '(magit-blame :wk "Magit Blame")
    "gf" '(magit-log-buffer-file :wk "File History Log")
+   "gs" '(magit-stage-files :wk "Stage File")
+   "gd" '(:ignore t :which-key "Diff")
+   "gdd" '(magit-ediff-dwim :wk "Dwim")
+   "gdc" '(magit-ediff-compare :wk "Compare Revisions")
+   "gdu" '(magit-ediff-show-unstaged :wd "Diff Unstaged")
+   "gds" '(magit-ediff-show-staged :wk "Diff Staged")
    "s"  '(:ignore t :which-key "Search")
    "so" '(consult-outline :wk "Search Outline")
    "sl" '(consult-line :wk "Search Current Buffer")
@@ -165,6 +227,8 @@ Asks for confirmation before overwriting an existing file."
    "gp" '(evil-yank-pop-next :wk "Paste Next from Kill Ring")
    "gP" '(evil-yank-pop-previous :wk "Paste Previous from Kill Ring"))
 
+  ;; This with-eval-after-load block is correctly placed inside the
+  ;; :config block of `use-package general`, just as it was in your original file.
   (with-eval-after-load 'evil-textobj-tree-sitter
     (define-key evil-outer-text-objects-map "=" (evil-textobj-tree-sitter-get-textobj "assignment.outer"))
     (define-key evil-inner-text-objects-map "=" (evil-textobj-tree-sitter-get-textobj "assignment.inner"))
@@ -284,6 +348,13 @@ Asks for confirmation before overwriting an existing file."
     (setq eshell-destroy-buffer-when-process-dies t)
     (setq eshell-visual-commands '("htop" "zsh" "vim"))))
 
+(use-package ediff
+  :ensure nil ; It's built-in
+  :config
+  ;; This explicitly tells the Ediff control frame NOT to be fullscreen,
+  ;; overriding the global default-frame-alist setting.
+  (add-to-list 'ediff-control-frame-parameters '(fullscreen . nil)))
+
 ;; =============================================================================
 ;; VI. PYTHON & AI DEVELOPMENT ENVIRONMENT
 ;; =============================================================================
@@ -308,7 +379,7 @@ Asks for confirmation before overwriting an existing file."
 (use-package dap-mode
   :ensure t
   :straight (:type git :host github :repo "emacs-lsp/dap-mode")
-  :hook (python-ts-mode . my-dap-python-setup)
+  :hook ((my/python-major-mode . my-dap-python-setup))
   :config
   (require 'dap-ui)
   (dap-ui-mode 1))
@@ -320,23 +391,18 @@ Asks for confirmation before overwriting an existing file."
   (company-mode)
   (highlight-indent-guides-mode))
 
-;; --- CORRECTED: Keybindings defined individually for robustness ---
 (defun my-python-mode-keys ()
   "Sets up the 'SPC m' leader keys specifically for Python mode."
   (general-define-key
-   :keymaps 'python-ts-mode-map
+   :keymaps my/python-mode-map
    :states 'normal
    :prefix "SPC"
-
    "m"  '(:ignore t :which-key "Python")
-   ;; LSP / Eglot
    "ma" '(eglot-code-actions :wk "Code Actions")
    "md" '(eldoc :wk "Documentation")
    "mf" '(eglot-format-buffer :wk "Format Buffer")
    "mr" '(eglot-rename :wk "Rename Symbol")
-   ;; Running Code
    "ms" '(run-python :wk "Run Script")
-   ;; Debugging (dap-mode)
    "mD" '(:ignore t :wk "Debug")
    "mDb" '(dap-breakpoint-toggle :wk "Toggle Breakpoint")
    "mDc" '(dap-continue :wk "Continue")
@@ -350,16 +416,18 @@ Asks for confirmation before overwriting an existing file."
 (use-package python
   :ensure nil ; It's built-in
   :mode (("\\.py\\'" . python-ts-mode))
-  :hook ((python-ts-mode . my-python-mode-setup)
-         (python-ts-mode . my-python-mode-keys))
+  ;; -- SWITCH: The hooks are now applied to the dynamic major mode variable.
+  :hook ((my/python-major-mode . my-python-mode-setup)
+         (my/python-major-mode . my-python-mode-keys))
   :custom (python-shell-interpreter "ipython3"))
 
 (use-package eglot
   :ensure t
   :straight (:type git :host github :repo "joaotavora/eglot")
   :config
+  ;; -- SWITCH: Eglot server is associated with the dynamic major mode.
   (add-to-list 'eglot-server-programs
-               '(python-ts-mode . ("ruff" "server" "--preview"))))
+               (list my/python-major-mode . ("ruff" "server" "--preview"))))
 
 (use-package exec-path-from-shell
   :ensure t
@@ -415,35 +483,45 @@ Asks for confirmation before overwriting an existing file."
 ;; VII. UTILITY & MISCELLANEOUS PACKAGES
 ;; =============================================================================
 
-(use-package treesit-auto
-  :ensure t
-  :straight (:type git :host github :repo "renzmann/treesit-auto")
-  :config
-  (treesit-auto-add-to-auto-mode-alist 'all)
-  (global-treesit-auto-mode))
+;; -- SWITCH: This section is now conditional based on the master switch.
+(if my/use-elisp-tree-sitter
+    ;; If using elisp-tree-sitter, we don't need treesit-auto or treesit-fold
+    (progn
+      (use-package tree-sitter
+        :ensure t
+        :straight (:type git :host github :repo "emacs-tree-sitter/elisp-tree-sitter")
+        :config
+        (require 'tree-sitter-langs)
+        (tree-sitter-require 'python)
+        (global-tree-sitter-mode)
+        :hook (tree-sitter-after-on . tree-sitter-hl-mode))
+      (use-package tree-sitter-langs
+        :ensure t
+        :straight (:type git :host github :repo "emacs-tree-sitter/tree-sitter-langs")
+        :after tree-sitter))
+  ;; If using native treesit, load your original packages
+  (progn
+    (use-package treesit-auto
+      :ensure t
+      :straight (:type git :host github :repo "renzmann/treesit-auto")
+      :config
+      (treesit-auto-add-to-auto-mode-alist 'all)
+      (global-treesit-auto-mode))
 
-(use-package treesit-fold
-  :ensure t
-  :straight (:type git :host github :repo "emacs-tree-sitter/treesit-fold")
-  :hook (treesit-auto-mode . treesit-fold-mode))
+    (use-package treesit-fold
+      :ensure t
+      :straight (:type git :host github :repo "emacs-tree-sitter/treesit-fold")
+      :hook (treesit-auto-mode . treesit-fold-mode))))
 
-(use-package evil-textobj-tree-sitter :ensure t
+;; -- SWITCH: The original evil-textobj-tree-sitter declaration has been modified
+;; to remove the hack and correctly wait for the backend to load.
+(use-package evil-textobj-tree-sitter
+  :ensure t
+  :after (evil-collection tree-sitter treesit-auto) ; Waits for whichever backend is loaded
   :config
-  ;; --- THIS IS THE FIX for the query loading ---
-  ;; 1. Define our own function that FORCES the use of the richer 'queries' directory.
-(defun evil-textobj-tree-sitter--get-queries-dir ()
-  "Get the queries directory.
-Currently treesit queries are different from queries for elisp-tree-sitter."
-  (if (evil-textobj-tree-sitter--use-builtin-treesitter)
-      (file-name-as-directory (concat evil-textobj-tree-sitter--dir "treesit-queries"))
-    (file-name-as-directory (concat evil-textobj-tree-sitter--dir "queries"))))
-  (defun my-force-rich-ts-queries-dir ()
-    "Forcibly return the path to the complete `queries` directory."
-    (let ((base-dir (file-name-directory (locate-library "evil-textobj-tree-sitter.el"))))
-      (expand-file-name "queries" base-dir)))
-  
-  ;; 2. Tell evil-textobj-tree-sitter to use OUR function instead of its default logic.
-  (setq evil-textobj-tree-sitter--get-queries-dir-func #'my-force-rich-ts-queries-dir))
+  ;; The hacky functions from your original config are now correctly removed.
+  ;; The package will correctly auto-detect the backend.
+  )
 
 (use-package highlight-indent-guides
   :ensure t
@@ -461,14 +539,43 @@ Currently treesit queries are different from queries for elisp-tree-sitter."
 
 (use-package dotenv
   :ensure t
-  :straight (dotenv :type git
-		    :host github
-		    :repo "pkulev/dotenv.el"))
+  :straight (:type git
+             :host github
+             :repo "pkulev/dotenv.el"))
 
 (use-package vterm
   :ensure t
   :straight (:type git :host github :repo "akermu/emacs-libvterm"))
 
+;; (use-package pdf-tools
+;;   :ensure t
+;;   :straight (:type git :host github :repo "vedang/pdf-tools")
+;;   ;; We remove EVERYTHING else. No :defer, no :config, no :magic.
+;;   ;; This makes the block inert at startup.
+;; )
+;; (defun my/configure-pdf-tools-after-frame ()
+;;   "Configure pdf-tools once a graphical frame is available.
+;; This function is intended to be run from `server-after-make-frame-hook`."
+;;   ;; Now we do the setup that was failing before.
+;;   ;; The require call will load the package.
+;;   (require 'pdf-tools)
+
+;;   ;; This is the standard way to associate PDFs with pdf-view-mode.
+;;   ;; It's an autoload, so it's efficient.
+;;   (add-to-list 'auto-mode-alist '("\\.pdf\\'" . pdf-view-mode))
+
+;;   ;; Install the server if it's not already built.
+;;   (pdf-tools-install :no-query)
+
+;;   ;; Add your custom hooks.
+;;   (add-hook 'pdf-view-mode-hook #'pdf-view-fit-width-to-window))
+
+;; ;; This is the crucial part. It tells the Emacs server to run our
+;; ;; setup function, but only after a client has connected.
+;; (add-hook 'server-after-make-frame-hook #'my/configure-pdf-tools-after-frame)
+
+
 (use-package cuda-mode :ensure t)
 (use-package markdown-mode :ensure t)
 (use-package mermaid-mode :ensure t)
+(put 'narrow-to-region 'disabled nil)
